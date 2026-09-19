@@ -2064,6 +2064,29 @@ async function runAbortableRequest(callback, timeoutMs) {
     }
 }
 
+// Luker 宿主适配：Luker 的 /api/search/searxng 返回归一化 JSON
+// （{provider, query, result_count, results:[{title,url,snippet}]}），
+// 与上游 ST 透传 SearXNG HTML 的行为不同；非 JSON 时回退 HTML 解析。
+function parseSearxngResponse(rawText, baseUrl, maxResults) {
+    try {
+        const payload = JSON.parse(String(rawText || ''));
+        if (Array.isArray(payload?.results)) {
+            return payload.results
+                .slice(0, maxResults)
+                .map(row => ({
+                    title: normalizeWhitespace(row?.title || ''),
+                    url: canonicalizeUrl(String(row?.url || '')),
+                    snippet: normalizeWhitespace(row?.snippet || row?.content || ''),
+                    published: normalizeWhitespace(row?.publishedDate || row?.published || ''),
+                }))
+                .filter(item => item.url && (item.title || item.snippet));
+        }
+    } catch {
+        // 非 JSON：回退上游 HTML 解析
+    }
+    return parseSearxngHtml(rawText, baseUrl, maxResults);
+}
+
 function parseSearxngHtml(html, baseUrl, maxResults) {
     const documentNode = new DOMParser().parseFromString(String(html || ''), 'text/html');
     const articles = [...documentNode.querySelectorAll('#urls article.result, article.result')];
@@ -2259,6 +2282,7 @@ async function searchSearxng(query, settings) {
             baseUrl,
             query,
             preferences,
+            maxResults: settings.maxResultsPerQuery,
         }),
         signal,
     }), settings.requestTimeoutMs);
@@ -2267,7 +2291,8 @@ async function searchSearxng(query, settings) {
         throw new Error(`SearXNG request failed (${response.status})`);
     }
 
-    const parsedItems = parseSearxngHtml(await response.text(), baseUrl, settings.maxResultsPerQuery);
+    const rawText = await response.text();
+    const parsedItems = parseSearxngResponse(rawText, baseUrl, settings.maxResultsPerQuery);
     const items = limitSearchItemsToCharacterBudget(query, parsedItems, settings);
     if (!items.length) {
         throw new Error('SearXNG returned no usable results');
