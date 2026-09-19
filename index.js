@@ -16,12 +16,19 @@ import {
 } from '../../../../script.js';
 import { DOMPurify } from '../../../../lib.js';
 import {
-    doExtrasFetch,
     extension_settings,
-    getApiUrl,
-    modules,
     renderExtensionTemplateAsync,
 } from '../../../extensions.js';
+
+// ── Luker 宿主适配 ─────────────────────────────────────────────
+// Luker 的 extensions.js 移除了旧 Extras API 三件套（doExtrasFetch / getApiUrl / modules），
+// 保留具名导入会导致本扩展整个 ES 模块图解析失败、静默消失。
+// 改用 Luker 核心（extensions/search-tools）的原生惯用法：
+//   - getApiUrl() → window.location.origin
+//   - doExtrasFetch(url, opts) → fetch(url, opts)（相对路径）
+//   - modules 全局注册表 → EXTRAS_MODULES 局部常量：Luker 无 Extras 模块加载机制，
+//     恒为空，Extras 兼容路径按设计报“未加载”。
+const EXTRAS_MODULES = [];
 import { is_group_generating } from '../../../group-chats.js';
 import { textgen_types, textgenerationwebui_settings } from '../../../textgen-settings.js';
 import { cancelDebounce } from '../../../utils.js';
@@ -673,7 +680,12 @@ function switchProviderConnectionUi(provider) {
 
 function confirmCredentialTarget(provider, normalizedUrl) {
     const definition = getDirectProviderDefinition(provider);
-    const url = new URL(normalizedUrl);
+    let url;
+    try {
+        url = new URL(normalizedUrl);
+    } catch {
+        throw new Error(`${definition.label} API URL 无效：${normalizedUrl}`);
+    }
     const warnings = [];
     const isLoopback = ['127.0.0.1', '::1', 'localhost'].includes(url.hostname.toLowerCase());
     if (isLoopback) {
@@ -1387,7 +1399,7 @@ function getSourceSectionState(settings = getSettings()) {
     }
     if (backend === 'extras') {
         const config = getBrowserSearchConfig('extras', settings);
-        const ready = Array.isArray(modules) && modules.includes('websearch') && Boolean(config.apiUrl);
+        const ready = EXTRAS_MODULES.includes('websearch') && Boolean(config.apiUrl);
         return { label, text: ready ? '兼容模式' : '未配置', missing: !ready };
     }
     if (backend === 'selenium') {
@@ -1668,10 +1680,6 @@ function applyPlannerRequestTuning(request, adapter) {
 function getPlannerDirectSecretRecords() {
     const records = secret_state?.[SECRET_KEYS.CUSTOM];
     return Array.isArray(records) ? records : [];
-}
-
-function getActivePlannerCustomSecret() {
-    return getPlannerDirectSecretRecords().find(record => record?.active) || null;
 }
 
 function plannerDirectSecretExists(secretId) {
@@ -2012,7 +2020,7 @@ function getBrowserSearchConfig(backend, settings = getSettings()) {
     let apiUrl = '';
     if (backend === 'extras') {
         try {
-            apiUrl = String(getApiUrl() || '').trim();
+            apiUrl = String(window.location.origin || '').trim();
         } catch {
             apiUrl = '';
         }
@@ -2514,7 +2522,7 @@ function buildLegacyAggregateResult(query, normalized, settings, cacheKey, provi
 
 async function searchExtras(query, settings) {
     const config = getBrowserSearchConfig('extras', settings);
-    if (!Array.isArray(modules) || !modules.includes('websearch')) {
+    if (!EXTRAS_MODULES.includes('websearch')) {
         throw new Error('Extras API 未加载 websearch 模块（该项目已停止维护）');
     }
     if (!config.apiUrl) throw new Error('尚未在 SillyTavern 中配置 Extras API URL');
@@ -2535,7 +2543,7 @@ async function searchExtras(query, settings) {
     const cached = getCachedSearchResult(cacheKey, settings);
     if (cached) return cached;
 
-    const response = await runAbortableRequest(signal => doExtrasFetch(url, {
+    const response = await runAbortableRequest(signal => fetch(url, {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
@@ -2597,7 +2605,7 @@ async function ensureStructuredSearchBackendReady(settings) {
         return;
     }
     if (backend === 'extras') {
-        if (!Array.isArray(modules) || !modules.includes('websearch')) {
+        if (!EXTRAS_MODULES.includes('websearch')) {
             throw new Error('Extras API 未加载 websearch 模块（该项目已停止维护）');
         }
         const { apiUrl } = getBrowserSearchConfig('extras', settings);
@@ -4118,7 +4126,12 @@ function refreshPlannerDirectProfilesUi() {
 }
 
 function confirmPlannerDirectCredentialTarget(apiUrl) {
-    const url = new URL(apiUrl);
+    let url;
+    try {
+        url = new URL(apiUrl);
+    } catch {
+        throw new Error(`规划器 API URL 无效：${apiUrl}`);
+    }
     const hostname = url.hostname.toLowerCase();
     const loopback = ['localhost', '127.0.0.1', '::1'].includes(hostname);
     if (loopback) return true;
@@ -4138,9 +4151,14 @@ async function readPersistedPlannerSettingsEnvelopeStrict() {
     });
     if (!response.ok) throw new Error(`无法回读酒馆设置（HTTP ${response.status}）`);
     const payload = await response.json();
-    const persistedRoot = typeof payload?.settings === 'string'
-        ? JSON.parse(payload.settings)
-        : payload?.settings;
+    let persistedRoot;
+    try {
+        persistedRoot = typeof payload?.settings === 'string'
+            ? JSON.parse(payload.settings)
+            : payload?.settings;
+    } catch {
+        throw new Error('酒馆设置回读格式无效');
+    }
     if (!persistedRoot || typeof persistedRoot !== 'object' || Array.isArray(persistedRoot)) {
         throw new Error('酒馆设置回读格式无效');
     }
